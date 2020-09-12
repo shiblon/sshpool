@@ -53,7 +53,7 @@ func TrueRequestHandler(t string, wantReply bool, payload []byte) bool {
 
 // FalseRequestHandler returns false for every request regardless of payload.
 func FalseRequestHandler(t string, wantReply bool, payload []byte) bool {
-	return true
+	return false
 }
 
 // Chan is an abstraction around ssh.Channel that is pool-aware.
