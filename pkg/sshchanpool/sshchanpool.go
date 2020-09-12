@@ -11,6 +11,7 @@ import (
 	"log"
 	"sync"
 
+	"entrogo.com/entroq/subq"
 	"github.com/pkg/errors"
 	"golang.org/x/crypto/ssh"
 )
@@ -129,6 +130,8 @@ type SSHChanPool struct {
 
 	maxChannels int // maximum allowed channels, 0 indicates no imposed limit.
 	busy        []*SSHChan
+
+	poolSub *SubQ // notify/wait for pool size changes
 }
 
 // Option is used to modify how pools are created.
@@ -146,7 +149,8 @@ func WithMaxChannels(max int) Option {
 // up on their own when finished.
 func New(ctx context.Context, conn ssh.Conn, opts ...Option) (*SSHChanPool, error) {
 	cp := &SSHChanPool{
-		Conn: conn,
+		Conn:    conn,
+		poolSub: subq.New(),
 	}
 	for _, o := range opts {
 		o(cp)
@@ -154,9 +158,11 @@ func New(ctx context.Context, conn ssh.Conn, opts ...Option) (*SSHChanPool, erro
 	return cp, nil
 }
 
-// Claim creates an SSHChan (if it can) and passes it back.
+// TryClaim creates an SSHChan (if it can) and passes it back.
 // The caller should close the SSHChan when finished, to return it
 // to the pool. The underlying channel is closed at that time.
+//
+// Does not block if the pool is empty, rather returns a TooManyChannels error.
 func (p *SSHChanPool) TryClaim(ctx context.Context, opts ...ChannelOption) (*SSHChan, error) {
 	defer un(lock(p))
 
@@ -169,7 +175,30 @@ func (p *SSHChanPool) TryClaim(ctx context.Context, opts ...ChannelOption) (*SSH
 		return nil, errors.Wrap(err, "try claim")
 	}
 
-	return newSSHChan(ctx, p, sch, rch, opts...), nil
+	c := newSSHChan(ctx, p, sch, rch, opts...)
+	p.busy = append(p.busy, c)
+	return c, nil
+}
+
+const poolNotifyQueue = "sshpool"
+
+// Claim blocks on the pool until a channel can be claimed. Returns immediately for unlimited pools.
+func (p *SSHChanPool) Claim(ctx context.Context, opts ...ChannelOption) (*SSHChan, error) {
+	var (
+		c        *SSHChan
+		claimErr error
+	)
+	if err := poolSub.Wait(ctx, []string{poolNotifyQueue}, 0, func() bool {
+		c, claimErr = p.TryClaim(ctx, opts...)
+		// Stop trying if successful, or a non-waitable error occurs.
+		return claimErr != nil || errors.Cause(claimErr) != TooManyChannels
+	}); err != nil {
+		return nil, errors.Wrap(err, "claim")
+	}
+	if claimErr != nil {
+		return nil, errors.Wrap(claimErr, "claim")
+	}
+	return c, nil
 }
 
 // release returns the channel to the pool. It does not close it, that should be done by the caller.
@@ -180,6 +209,7 @@ func (p *SSHChanPool) release(c *SSHChan) error {
 			// Swap the one we found to the end, then shorten, since order is unimportant.
 			p.busy[len(p.busy)-1], p.busy[i] = p.busy[i], p.busy[len(p.busy)-1]
 			p.busy = p.busy[:len(p.busy)-1]
+			poolSub.Notify(poolNotifyQueue)
 			return nil
 		}
 	}
