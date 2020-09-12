@@ -131,7 +131,7 @@ type SSHChanPool struct {
 	maxChannels int // maximum allowed channels, 0 indicates no imposed limit.
 	busy        []*SSHChan
 
-	poolSub *SubQ // notify/wait for pool size changes
+	poolSub *subq.SubQ // notify/wait for pool size changes
 }
 
 // Option is used to modify how pools are created.
@@ -188,7 +188,8 @@ func (p *SSHChanPool) Claim(ctx context.Context, opts ...ChannelOption) (*SSHCha
 		c        *SSHChan
 		claimErr error
 	)
-	if err := poolSub.Wait(ctx, []string{poolNotifyQueue}, 0, func() bool {
+	if err := p.poolSub.Wait(ctx, []string{poolNotifyQueue}, 0, func() bool {
+		defer p.poolSub.Notify(poolNotifyQueue)
 		c, claimErr = p.TryClaim(ctx, opts...)
 		// Stop trying if successful, or a non-waitable error occurs.
 		return claimErr != nil || errors.Cause(claimErr) != TooManyChannels
@@ -209,7 +210,7 @@ func (p *SSHChanPool) release(c *SSHChan) error {
 			// Swap the one we found to the end, then shorten, since order is unimportant.
 			p.busy[len(p.busy)-1], p.busy[i] = p.busy[i], p.busy[len(p.busy)-1]
 			p.busy = p.busy[:len(p.busy)-1]
-			poolSub.Notify(poolNotifyQueue)
+			p.poolSub.Notify(poolNotifyQueue)
 			return nil
 		}
 	}
