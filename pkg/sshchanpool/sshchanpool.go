@@ -27,7 +27,6 @@ package sshchanpool // import "entrogo.com/sshpool/pkg/sshchanpool"
 
 import (
 	"context"
-	"log"
 	"sync"
 
 	"entrogo.com/entroq/subq"
@@ -68,7 +67,7 @@ type SSHChan struct {
 	done chan bool
 }
 
-func newSSHChan(ctx context.Context, pool *SSHChanPool, ch ssh.Channel, reqCh <-chan *ssh.Request, opts ...ChannelOption) *SSHChan {
+func newSSHChan(pool *SSHChanPool, ch ssh.Channel, reqCh <-chan *ssh.Request, opts ...ChannelOption) *SSHChan {
 	sch := &SSHChan{
 		Ch:   ch,
 		done: make(chan bool),
@@ -87,9 +86,6 @@ func newSSHChan(ctx context.Context, pool *SSHChanPool, ch ssh.Channel, reqCh <-
 		for {
 			select {
 			case <-sch.done:
-				return
-			case <-ctx.Done():
-				log.Printf("SSHChan context canceled: %v", ctx.Err())
 				return
 			case req := <-reqCh:
 				val := sch.handler(req.Type, req.WantReply, req.Payload)
@@ -166,7 +162,7 @@ func WithMaxChannels(max int) Option {
 // New creates a new SSHChanPool given an already-created ssh connection
 // It does not take ownership of the connection: callers should clean it
 // up on their own when finished.
-func New(ctx context.Context, conn ssh.Conn, opts ...Option) (*SSHChanPool, error) {
+func New(conn ssh.Conn, opts ...Option) (*SSHChanPool, error) {
 	cp := &SSHChanPool{
 		Conn:    conn,
 		poolSub: subq.New(),
@@ -182,7 +178,7 @@ func New(ctx context.Context, conn ssh.Conn, opts ...Option) (*SSHChanPool, erro
 // to the pool. The underlying channel is closed at that time.
 //
 // Does not block if the pool is empty, rather returns a TooManyChannels error.
-func (p *SSHChanPool) TryClaim(ctx context.Context, opts ...ChannelOption) (*SSHChan, error) {
+func (p *SSHChanPool) TryClaim(opts ...ChannelOption) (*SSHChan, error) {
 	defer un(lock(p))
 
 	if p.maxChannels > 0 && len(p.busy) >= p.maxChannels {
@@ -194,7 +190,7 @@ func (p *SSHChanPool) TryClaim(ctx context.Context, opts ...ChannelOption) (*SSH
 		return nil, errors.Wrap(err, "try claim")
 	}
 
-	c := newSSHChan(ctx, p, sch, rch, opts...)
+	c := newSSHChan(p, sch, rch, opts...)
 	p.busy = append(p.busy, c)
 	return c, nil
 }
