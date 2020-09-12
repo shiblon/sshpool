@@ -4,6 +4,25 @@
 //
 // Each channel, when released, is actually closed, and a new
 // claim creates a new channel over the provided connection.
+//
+// Example:
+//
+// 	// Create an ssh.Conn in the conn variable, however you want, then...
+//  pool := New(ctx, conn, WithMaxChannels(10))
+//  sch, err := pool.Claim(ctx)
+//  if err != nil {
+//    log.Fatalf("Error claiming: %v", err)
+//  }
+//  defer sch.Close()
+//
+//  sftpCli, err := sftp.NewClientPipe(sch.Ch, sch.Ch)
+//  if err != nil {
+//    log.Fatalf("Error creating sftp client: %v", err)
+//  }
+//  defer sftpCli.Close()
+//
+//  // Use the sftpCli over the channel until done.
+//
 package sshchanpool // import "entrogo.com/sshpool/pkg/sshchanpool"
 
 import (
