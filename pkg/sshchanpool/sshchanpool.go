@@ -35,9 +35,9 @@ import (
 )
 
 var (
-	// TooManyChannels is returned when the pool is "empty", meaning no more
+	// PoolExhausted is returned when the pool is "empty", meaning no more
 	// channels can be claimed.
-	TooManyChannels = errors.New("too many channels")
+	PoolExhausted = errors.New("too many channels")
 
 	// ChannelNotFound is returned when attempting to close a channel not in the pool.
 	ChannelNotFound = errors.New("channel not found")
@@ -56,19 +56,19 @@ func FalseRequestHandler(t string, wantReply bool, payload []byte) bool {
 	return true
 }
 
-// SSHChan is an abstraction around ssh.Channel that is pool-aware.
+// Chan is an abstraction around ssh.Channel that is pool-aware.
 // When finished, callers should invoke Close on it to return it
 // to the pool.
-type SSHChan struct {
+type Chan struct {
 	ssh.Channel
 
 	handler RequestHandler
-	pool    *SSHChanPool
+	pool    *Pool
 	done    chan bool
 }
 
-func newSSHChan(pool *SSHChanPool, ch ssh.Channel, reqCh <-chan *ssh.Request, opts ...ChannelOption) *SSHChan {
-	sch := &SSHChan{
+func newChan(pool *Pool, ch ssh.Channel, reqCh <-chan *ssh.Request, opts ...ChannelOption) *Chan {
+	sch := &Chan{
 		Channel: ch,
 		done:    make(chan bool),
 		pool:    pool,
@@ -100,7 +100,7 @@ func newSSHChan(pool *SSHChanPool, ch ssh.Channel, reqCh <-chan *ssh.Request, op
 }
 
 // Close returns this channel to the pool and closes the underlying channel.
-func (c *SSHChan) Close() (err error) {
+func (c *Chan) Close() (err error) {
 	defer close(c.done) // stop the handler
 	defer func() {
 		cerr := c.Channel.Close()
@@ -112,13 +112,13 @@ func (c *SSHChan) Close() (err error) {
 }
 
 // ChannelOption is used to specify characteristics of the requested channel, when claiming.
-type ChannelOption func(*SSHChan)
+type ChannelOption func(*Chan)
 
 // WithRequestHandler sets a function to call whenever an out-of-band
 // request comes in on the client channel. Uses DefaultRequestHandler
 // when not specified.
 func WithRequestHandler(h RequestHandler) ChannelOption {
-	return func(c *SSHChan) {
+	return func(c *Chan) {
 		c.handler = h
 	}
 }
@@ -136,66 +136,64 @@ func un(undo func()) {
 	undo()
 }
 
-// SSHChanPool provides convenient ways to create new channels within
+// Pool provides convenient ways to create new channels within
 // an existing SSH connection.
-type SSHChanPool struct {
+type Pool struct {
 	sync.Mutex
 
 	Conn ssh.Conn
 
 	maxChannels int // maximum allowed channels, 0 indicates no imposed limit.
-	busy        []*SSHChan
+	busy        []*Chan
 
 	poolSub *subq.SubQ // notify/wait for pool size changes
 }
 
 // Option is used to modify how pools are created.
-type Option func(*SSHChanPool)
+type Option func(*Pool)
 
 // WithMaxChannels sets the maximum allowed simultaneous channels for a connection.
 func WithMaxChannels(max int) Option {
-	return func(cp *SSHChanPool) {
+	return func(cp *Pool) {
 		cp.maxChannels = max
 	}
 }
 
-// New creates a new SSHChanPool given an already-created ssh connection
+// New creates a new Pool given an already-created ssh connection
 // It does not take ownership of the connection: callers should clean it
 // up on their own when finished.
-func New(conn ssh.Conn, opts ...Option) (*SSHChanPool, error) {
-	cp := &SSHChanPool{
+func New(conn ssh.Conn, opts ...Option) *Pool {
+	cp := &Pool{
 		Conn:    conn,
 		poolSub: subq.New(),
 	}
 	for _, o := range opts {
 		o(cp)
 	}
-	return cp, nil
+	return cp
 }
 
-// Empty indicates whether the pool is "empty", meaning the maximum
-// number of connections has been reached.
-func (p *SSHChanPool) Empty() bool {
-	defer un(lock(p))
-	return p.maxChannels > 0 && len(p.busy) >= p.maxChannels
+// Exhausted indicates whether this pool is exhausted (not free for claims).
+func (p *Pool) Exhausted() bool {
+	return p.maxChannels > 0 && p.Used() >= p.maxChannels
 }
 
 // Len indicates how many things are busy from the pool.
-func (p *SSHChanPool) Len() int {
+func (p *Pool) Used() int {
 	defer un(lock(p))
 	return len(p.busy)
 }
 
-// TryClaim creates an SSHChan (if it can) and passes it back.
-// The caller should close the SSHChan when finished, to return it
+// TryClaim creates a Chan (if it can) and passes it back.
+// The caller should close the Chan when finished, to return it
 // to the pool. The underlying channel is closed at that time.
 //
-// Does not block if the pool is empty, rather returns a TooManyChannels error.
-func (p *SSHChanPool) TryClaim(opts ...ChannelOption) (*SSHChan, error) {
+// Does not block if the pool is empty, rather returns a PoolExhausted error.
+func (p *Pool) TryClaim(opts ...ChannelOption) (*Chan, error) {
 	defer un(lock(p))
 
 	if p.maxChannels > 0 && len(p.busy) >= p.maxChannels {
-		return nil, TooManyChannels
+		return nil, PoolExhausted
 	}
 
 	sch, rch, err := p.Conn.OpenChannel("session", nil)
@@ -203,7 +201,7 @@ func (p *SSHChanPool) TryClaim(opts ...ChannelOption) (*SSHChan, error) {
 		return nil, errors.Wrap(err, "try claim")
 	}
 
-	c := newSSHChan(p, sch, rch, opts...)
+	c := newChan(p, sch, rch, opts...)
 	p.busy = append(p.busy, c)
 	return c, nil
 }
@@ -211,16 +209,16 @@ func (p *SSHChanPool) TryClaim(opts ...ChannelOption) (*SSHChan, error) {
 const poolNotifyQueue = "sshpool"
 
 // Claim blocks on the pool until a channel can be claimed. Returns immediately for unlimited pools.
-func (p *SSHChanPool) Claim(ctx context.Context, opts ...ChannelOption) (*SSHChan, error) {
+func (p *Pool) Claim(ctx context.Context, opts ...ChannelOption) (*Chan, error) {
 	var (
-		c        *SSHChan
+		c        *Chan
 		claimErr error
 	)
 	if err := p.poolSub.Wait(ctx, []string{poolNotifyQueue}, 0, func() bool {
 		defer p.poolSub.Notify(poolNotifyQueue)
 		c, claimErr = p.TryClaim(opts...)
 		// Stop trying if successful, or a non-waitable error occurs.
-		return claimErr != nil || errors.Cause(claimErr) != TooManyChannels
+		return claimErr != nil || errors.Cause(claimErr) != PoolExhausted
 	}); err != nil {
 		return nil, errors.Wrap(err, "claim")
 	}
@@ -231,7 +229,7 @@ func (p *SSHChanPool) Claim(ctx context.Context, opts ...ChannelOption) (*SSHCha
 }
 
 // release returns the channel to the pool. It does not close it, that should be done by the caller.
-func (p *SSHChanPool) release(c *SSHChan) error {
+func (p *Pool) release(c *Chan) error {
 	defer un(lock(p))
 	for i, b := range p.busy {
 		if b == c {
@@ -247,7 +245,7 @@ func (p *SSHChanPool) release(c *SSHChan) error {
 
 // Close cleans up the channels in this pool (but does not clean up the
 // underlying connection). This should always be called when finished.
-func (p *SSHChanPool) Close() error {
+func (p *Pool) Close() error {
 	defer un(lock(p))
 
 	var err error // captures the last close error in the group.
