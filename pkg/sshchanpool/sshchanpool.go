@@ -15,7 +15,7 @@
 //  }
 //  defer sch.Close()
 //
-//  sftpCli, err := sftp.NewClientPipe(sch.Ch, sch.Ch)
+//  sftpCli, err := sftp.NewClientPipe(sch, sch)
 //  if err != nil {
 //    log.Fatalf("Error creating sftp client: %v", err)
 //  }
@@ -60,18 +60,18 @@ func FalseRequestHandler(t string, wantReply bool, payload []byte) bool {
 // When finished, callers should invoke Close on it to return it
 // to the pool.
 type SSHChan struct {
-	Ch      ssh.Channel
-	handler RequestHandler
+	ssh.Channel
 
-	pool *SSHChanPool
-	done chan bool
+	handler RequestHandler
+	pool    *SSHChanPool
+	done    chan bool
 }
 
 func newSSHChan(pool *SSHChanPool, ch ssh.Channel, reqCh <-chan *ssh.Request, opts ...ChannelOption) *SSHChan {
 	sch := &SSHChan{
-		Ch:   ch,
-		done: make(chan bool),
-		pool: pool,
+		Channel: ch,
+		done:    make(chan bool),
+		pool:    pool,
 	}
 
 	for _, o := range opts {
@@ -103,7 +103,7 @@ func newSSHChan(pool *SSHChanPool, ch ssh.Channel, reqCh <-chan *ssh.Request, op
 func (c *SSHChan) Close() (err error) {
 	defer close(c.done) // stop the handler
 	defer func() {
-		cerr := c.Ch.Close()
+		cerr := c.Channel.Close()
 		if err == nil {
 			err = errors.Wrap(cerr, "close ssh chan")
 		}
@@ -173,6 +173,19 @@ func New(conn ssh.Conn, opts ...Option) (*SSHChanPool, error) {
 	return cp, nil
 }
 
+// Empty indicates whether the pool is "empty", meaning the maximum
+// number of connections has been reached.
+func (p *SSHChanPool) Empty() bool {
+	defer un(lock(p))
+	return p.maxChannels > 0 && len(p.busy) >= p.maxChannels
+}
+
+// Len indicates how many things are busy from the pool.
+func (p *SSHChanPool) Len() int {
+	defer un(lock(p))
+	return len(p.busy)
+}
+
 // TryClaim creates an SSHChan (if it can) and passes it back.
 // The caller should close the SSHChan when finished, to return it
 // to the pool. The underlying channel is closed at that time.
@@ -205,7 +218,7 @@ func (p *SSHChanPool) Claim(ctx context.Context, opts ...ChannelOption) (*SSHCha
 	)
 	if err := p.poolSub.Wait(ctx, []string{poolNotifyQueue}, 0, func() bool {
 		defer p.poolSub.Notify(poolNotifyQueue)
-		c, claimErr = p.TryClaim(ctx, opts...)
+		c, claimErr = p.TryClaim(opts...)
 		// Stop trying if successful, or a non-waitable error occurs.
 		return claimErr != nil || errors.Cause(claimErr) != TooManyChannels
 	}); err != nil {
@@ -239,7 +252,7 @@ func (p *SSHChanPool) Close() error {
 
 	var err error // captures the last close error in the group.
 	for _, sch := range p.busy {
-		if serr := sch.Ch.Close(); serr != nil {
+		if serr := sch.Close(); serr != nil {
 			err = serr
 		}
 	}
