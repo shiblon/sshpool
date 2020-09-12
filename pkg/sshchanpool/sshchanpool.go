@@ -175,7 +175,14 @@ func New(conn ssh.Conn, opts ...Option) *Pool {
 
 // Exhausted indicates whether this pool is exhausted (not free for claims).
 func (p *Pool) Exhausted() bool {
-	return p.maxChannels > 0 && p.Used() >= p.maxChannels
+	defer un(lock(p))
+	return p.unsafeExhausted()
+}
+
+// unsafeExhausted provides access to whether the pool is exhausted, without
+// taking a mutex to do it.
+func (p *Pool) unsafeExhausted() bool {
+	return p.maxChannels > 0 && len(p.busy) >= p.maxChannels
 }
 
 // Len indicates how many things are busy from the pool.
@@ -192,7 +199,7 @@ func (p *Pool) Used() int {
 func (p *Pool) TryClaim(opts ...ChannelOption) (*Chan, error) {
 	defer un(lock(p))
 
-	if p.maxChannels > 0 && len(p.busy) >= p.maxChannels {
+	if p.unsafeExhausted() {
 		return nil, PoolExhausted
 	}
 
