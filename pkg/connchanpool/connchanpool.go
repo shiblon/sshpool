@@ -8,7 +8,7 @@
 //  p := New(func(ctx context.Context, id string) (ssh.Conn, error) {
 //  	// You supply this - whatever you need to do to make an ssh.Conn
 //  	// from the ID passed in. Return an error if you can't do this.
-//      return makeConn(deserializeConfig(id)), nil
+//      return makeConn(ctx, deserializeConfig(id)), nil
 //  })
 //
 //  sch, err := p.ClaimChannel(ctx, serializedConfig)
