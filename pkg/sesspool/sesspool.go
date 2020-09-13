@@ -59,6 +59,37 @@ func newSess(pool *Pool, sess *ssh.Session) *Session {
 	}
 }
 
+// AsSFTPClient can wrap a Claim method to produce an SFTP client.
+//
+// Example:
+//   cli, cleanup, err := AsSFTPClient(pool.Claim(ctx))
+//   if err != nil {
+//     // handle err
+//   }
+//   defer cleanup()
+//   // use cli
+func AsSFTPClient(s *Session, err error) (*sftp.Client, func() error, error) {
+	if err != nil {
+		return nil, nil, errors.Wrap(err, "as sftp client")
+	}
+	cli, err := s.SFTPClient()
+	if err != nil {
+		return nil, nil, errors.Wrap(err, "as sftp client")
+	}
+	return cli, func() error {
+		cerr := cli.Close()
+		serr := s.Close()
+		// Just return the deepest close error.
+		if serr != nil {
+			return serr
+		}
+		if cerr != nil {
+			return cerr
+		}
+		return nil
+	}, nil
+}
+
 // SFTPClient returns an sftp.Client for this session. Be sure to close it when finished.
 func (s *Session) SFTPClient(opts ...sftp.ClientOption) (*sftp.Client, error) {
 	if err := s.sess.RequestSubsystem("sftp"); err != nil {
