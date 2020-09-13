@@ -5,7 +5,7 @@
 //
 // Example:
 //
-//  p := New(func(id string) (ssh.Conn, error) {
+//  p := New(func(ctx context.Context, id string) (ssh.Conn, error) {
 //  	// You supply this - whatever you need to do to make an ssh.Conn
 //  	// from the ID passed in. Return an error if you can't do this.
 //      return makeConn(deserializeConfig(id)), nil
@@ -49,7 +49,7 @@ var (
 )
 
 // MakeSSHConnFunc creates an ssh.Conn and returns it, from the given ID.
-type MakeSSHConnFunc func(id string) (ssh.Conn, error)
+type MakeSSHConnFunc func(ctx context.Context, id string) (ssh.Conn, error)
 
 type connItem struct {
 	id       string
@@ -176,7 +176,7 @@ func (p *ConnChanPool) getOrCreate(ctx context.Context, id string, opts ...sshch
 	}
 
 	// Not found, room for it, create it.
-	conn, err := p.makeSSHConn(id)
+	conn, err := p.makeSSHConn(ctx, id)
 	if err != nil {
 		return nil, errors.Wrap(err, "get or create conn")
 	}
