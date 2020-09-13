@@ -176,10 +176,14 @@ func (p *ConnChanPool) getOrCreate(ctx context.Context, id string, opts ...sshch
 	}
 
 	// Not found, room for it, create it.
+	conn := p.makeSSHConn(id)
+	if conn == nil {
+		return nil, errors.Errorf("ssh conn function returned nil for id %v", id)
+	}
 	cc = &connItem{
 		id:       id,
 		lastUsed: time.Now(),
-		chanPool: sshchanpool.New(p.makeSSHConn(id), opts...),
+		chanPool: sshchanpool.New(conn, opts...),
 	}
 	p.conns[id] = cc
 	return cc, nil
