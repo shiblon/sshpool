@@ -5,9 +5,10 @@
 //
 // Example:
 //
-//  p := New(func(id string) sshchanpool.ChanPool {
-//      sshConn := makeConn(deserializeConfig(id))
-//      return sshchanpool.New(sshConn)
+//  p := New(func(id string) ssh.Conn {
+//  	// You supply this - whatever you need to do to make an ssh.Conn
+//  	// from the ID passed in.
+//      return makeConn(deserializeConfig(id))
 //  })
 //
 //  sch, err := p.ClaimChannel(ctx, serializedConfig)
@@ -35,6 +36,7 @@ import (
 
 	"entrogo.com/sshpool/pkg/sshchanpool"
 	"github.com/pkg/errors"
+	"golang.org/x/crypto/ssh"
 )
 
 const (
@@ -46,8 +48,8 @@ var (
 	PoolExhausted = errors.New("pool full")
 )
 
-// NewChanPoolFunc creates a new sshchanpool.Pool when the bucket needs a new item.
-type NewChanPoolFunc func(id string) *sshchanpool.Pool
+// MakeSSHConnFunc creates an ssh.Conn and returns it, from the given ID.
+type MakeSSHConnFunc func(id string) ssh.Conn
 
 type connItem struct {
 	id       string
@@ -61,7 +63,7 @@ type connItem struct {
 type ConnChanPool struct {
 	sync.Mutex
 
-	newChanPool NewChanPoolFunc
+	makeSSHConn MakeSSHConnFunc
 
 	expireAfter time.Duration
 	poolSize    int
@@ -94,9 +96,9 @@ func WithPoolSize(max int) Option {
 }
 
 // New creates a new ConnChanPool with the given options.
-func New(newChanPool NewChanPoolFunc, opts ...Option) *ConnChanPool {
+func New(makeSSHConn MakeSSHConnFunc, opts ...Option) *ConnChanPool {
 	p := &ConnChanPool{
-		newChanPool: newChanPool,
+		makeSSHConn: makeSSHConn,
 		expireAfter: DefaultExpireAfter,
 		poolSize:    DefaultPoolSize,
 		done:        make(chan bool),
@@ -121,13 +123,47 @@ func New(newChanPool NewChanPoolFunc, opts ...Option) *ConnChanPool {
 	return p
 }
 
+type chanPoolOpts struct {
+	poolOpts []sshchanpool.Option
+	chanOpts []sshchanpool.ChannelOption
+}
+
+// ChanPoolOption changes how ssh channel pools and their channels are created.
+type ChanPoolOption func(*chanPoolOpts)
+
+func newChanPoolOpts(opts ...ChanPoolOption) *chanPoolOpts {
+	o := new(chanPoolOpts)
+	o.apply(opts...)
+	return o
+}
+
+func (o *chanPoolOpts) apply(opts ...ChanPoolOption) {
+	for _, opt := range opts {
+		opt(o)
+	}
+}
+
+// WithSSHChannelPoolOptions sets options for creating a channel pool.
+func WithSSHChannelPoolOptions(opts ...sshchanpool.Option) ChanPoolOption {
+	return func(co *chanPoolOpts) {
+		co.poolOpts = append(co.poolOpts, opts...)
+	}
+}
+
+// WithSSHChannelOptions sets options for individual channels.
+func WithSSHChannelOptions(opts ...sshchanpool.ChannelOption) ChanPoolOption {
+	return func(co *chanPoolOpts) {
+		co.chanOpts = append(co.chanOpts, opts...)
+	}
+}
+
 // Exhausted tells us whether there are slots for new IDs to be added into the pool.
 func (p *ConnChanPool) Exhausted() bool {
 	defer un(lock(p))
 	return len(p.conns) >= p.poolSize
 }
 
-func (p *ConnChanPool) getOrCreate(id string, opts ...sshchanpool.ChannelOption) (*connItem, error) {
+func (p *ConnChanPool) getOrCreate(ctx context.Context, id string, opts ...sshchanpool.Option) (*connItem, error) {
 	defer un(lock(p))
 
 	cc := p.conns[id]
@@ -143,7 +179,7 @@ func (p *ConnChanPool) getOrCreate(id string, opts ...sshchanpool.ChannelOption)
 	cc = &connItem{
 		id:       id,
 		lastUsed: time.Now(),
-		chanPool: p.newChanPool(id),
+		chanPool: sshchanpool.New(p.makeSSHConn(id), opts...),
 	}
 	p.conns[id] = cc
 	return cc, nil
@@ -172,12 +208,14 @@ func (p *ConnChanPool) reap() {
 
 // TryClaimChannel attempts, without blocking, to claim a channel from the given ID in the pool.
 // Returns PoolExhausted error (from errors.Cause) if there are no available resources.
-func (p *ConnChanPool) TryClaimChannel(id string, opts ...sshchanpool.ChannelOption) (*sshchanpool.Chan, error) {
-	cc, err := p.getOrCreate(id)
+func (p *ConnChanPool) TryClaimChannel(ctx context.Context, id string, opts ...ChanPoolOption) (*sshchanpool.Chan, error) {
+	cpOpt := newChanPoolOpts(opts...)
+
+	cc, err := p.getOrCreate(ctx, id, cpOpt.poolOpts...)
 	if err != nil {
 		return nil, errors.Wrap(err, "try claim channel")
 	}
-	sch, err := cc.chanPool.TryClaim(opts...)
+	sch, err := cc.chanPool.TryClaim(ctx, cpOpt.chanOpts...)
 	if err != nil {
 		if errors.Cause(err) == sshchanpool.PoolExhausted {
 			return nil, errors.Wrap(PoolExhausted, "try claim from channel pool")
@@ -189,13 +227,14 @@ func (p *ConnChanPool) TryClaimChannel(id string, opts ...sshchanpool.ChannelOpt
 
 // ClaimChannel blocks until the context expires or a channel is obtained from the given ID in the pool.
 // Will block until an appropriate connection is available, or until a channel is available on a connection.
-func (p *ConnChanPool) ClaimChannel(ctx context.Context, id string, opts ...sshchanpool.ChannelOption) (*sshchanpool.Chan, error) {
+func (p *ConnChanPool) ClaimChannel(ctx context.Context, id string, opts ...ChanPoolOption) (*sshchanpool.Chan, error) {
+	cpOpt := newChanPoolOpts(opts...)
 	var (
 		cc  *connItem
 		err error
 	)
 	for {
-		cc, err = p.getOrCreate(id)
+		cc, err = p.getOrCreate(ctx, id, cpOpt.poolOpts...)
 		if err == nil {
 			break
 		}
@@ -209,7 +248,7 @@ func (p *ConnChanPool) ClaimChannel(ctx context.Context, id string, opts ...sshc
 		}
 	}
 
-	sch, err := cc.chanPool.Claim(ctx, opts...)
+	sch, err := cc.chanPool.Claim(ctx, cpOpt.chanOpts...)
 	if err != nil {
 		return nil, errors.Wrap(err, "claim channel")
 	}

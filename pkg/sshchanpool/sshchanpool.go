@@ -196,7 +196,7 @@ func (p *Pool) Used() int {
 // to the pool. The underlying channel is closed at that time.
 //
 // Does not block if the pool is empty, rather returns a PoolExhausted error.
-func (p *Pool) TryClaim(opts ...ChannelOption) (*Chan, error) {
+func (p *Pool) TryClaim(ctx context.Context, opts ...ChannelOption) (*Chan, error) {
 	defer un(lock(p))
 
 	if p.unsafeExhausted() {
@@ -223,7 +223,7 @@ func (p *Pool) Claim(ctx context.Context, opts ...ChannelOption) (*Chan, error) 
 	)
 	if err := p.poolSub.Wait(ctx, []string{poolNotifyQueue}, 0, func() bool {
 		defer p.poolSub.Notify(poolNotifyQueue)
-		c, claimErr = p.TryClaim(opts...)
+		c, claimErr = p.TryClaim(ctx, opts...)
 		// Stop trying if successful, or a non-waitable error occurs.
 		return claimErr != nil || errors.Cause(claimErr) != PoolExhausted
 	}); err != nil {
