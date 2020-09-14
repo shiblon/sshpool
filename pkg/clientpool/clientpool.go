@@ -10,19 +10,11 @@
 //
 //  // set addr and  clientConfig, then
 //
-//  sch, err := p.ClaimSession(clientConfig.String, func(context.Context) (*ssh.Client, error) {
-//  	return ssh.Dial("tcp", addr, clientConfig)
-//  })
+//  sftpCli, cleanup, err := sesspool.AsSFTPClient(p.ClaimSession(WithDialArgs("tcp", addr, clientConfig)))
 //  if err != nil {
-//      log.Fatalf("Error claiming session: %v", err)
+//      log.Fatalf("Error claiming sftp session: %v", err)
 //  }
-//  defer sch.Close()
-//
-//  sftpCli, err := sftp.NewClientPipe(sch, sch)
-//  if err != nil {
-//      log.Fatalf("Error creating sftp client: %v", err)
-//  }
-//  defer sftpCli.Close()
+//  defer cleanup()
 //
 //  // Use the sftpCli to do stuff with the session.
 //
@@ -32,6 +24,7 @@
 package clientpool // import "entrogo.com/sshpool/pkg/clientpool"
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -98,9 +91,6 @@ func WithPoolSize(max int) Option {
 	}
 }
 
-// NewSSHClientFunc returns a new ssh client.
-type NewSSHClientFunc func(ctx context.Context) (*ssh.Client, error)
-
 // New creates a new ClientPool with the given options.
 func New(opts ...Option) *ClientPool {
 	p := &ClientPool{
@@ -131,8 +121,10 @@ func (p *ClientPool) Exhausted() bool {
 	return len(p.conns) >= p.poolSize
 }
 
-func (p *ClientPool) getOrCreate(ctx context.Context, id string, newSSH NewSSHClientFunc, opts ...sesspool.Option) (*connItem, error) {
+func (p *ClientPool) getOrCreate(ctx context.Context, opts *claimOptions) (*connItem, error) {
 	defer un(lock(p))
+
+	id := opts.clientID()
 
 	cc := p.conns[id]
 	if cc != nil {
@@ -144,7 +136,7 @@ func (p *ClientPool) getOrCreate(ctx context.Context, id string, newSSH NewSSHCl
 	}
 
 	// Not found, room for it, create it.
-	cli, err := newSSH(ctx)
+	cli, err := opts.newSSHClient(ctx)
 	if err != nil {
 		return nil, errors.Wrap(err, "get or create client")
 	}
@@ -154,7 +146,7 @@ func (p *ClientPool) getOrCreate(ctx context.Context, id string, newSSH NewSSHCl
 	cc = &connItem{
 		id:       id,
 		lastUsed: time.Now(),
-		pool:     sesspool.New(cli, opts...),
+		pool:     sesspool.New(cli, opts.sessOpts...),
 	}
 	p.conns[id] = cc
 	return cc, nil
@@ -181,10 +173,111 @@ func (p *ClientPool) reap() {
 	}
 }
 
+// DialArgsID computes an ID from arguments that would be passed to ssh.Dial.
+// The ID is relatively sure to be unique, so is used to identify different SSH
+// connections in the pool.
+//
+// If you are specifying your own ID when creating an SSH client from scratch,
+// this can be useful to provide an ID with it.
+func DialArgsID(net, addr string, conf *ssh.ClientConfig) string {
+	return fmt.Sprintf("n=%v a=%v u=%v z=%v", net, addr, conf.User, conf.Auth)
+}
+
+type dialArgs struct {
+	net  string
+	addr string
+	conf *ssh.ClientConfig
+}
+
+type claimOptions struct {
+	id       string
+	dial     *dialArgs
+	sessOpts []sesspool.Option
+	newSSH   NewSSHClientFunc
+}
+
+func newClaimOptions(os ...ClaimOption) *claimOptions {
+	opts := new(claimOptions)
+	opts.apply(os...)
+	return opts
+}
+
+func (co *claimOptions) apply(opts ...ClaimOption) {
+	for _, opt := range opts {
+		opt(co)
+	}
+}
+
+func (co *claimOptions) newSSHClient(ctx context.Context) (*ssh.Client, error) {
+	if co.dial != nil && co.newSSH != nil {
+		return nil, errors.New("both dial args and client factory specified, only one can be given")
+	}
+	if co.newSSH != nil && co.id == "" {
+		return nil, errors.New("no ID provided with client factory")
+	}
+
+	if co.dial != nil {
+		return ssh.Dial(co.dial.net, co.dial.addr, co.dial.conf)
+	}
+
+	return co.newSSH(ctx)
+}
+
+func (co *claimOptions) clientID() string {
+	if co.id != "" {
+		return co.id
+	}
+
+	return DialArgsID(co.dial.net, co.dial.addr, co.dial.conf)
+}
+
+// ClaimOption changes how claims are done.
+type ClaimOption func(*claimOptions)
+
+// WithDialArgs specifies dial arguments to use for creating a new connection when claiming.
+// If no ID is also given using WithClientID, the ID is inferred from the dial arguments.
+func WithDialArgs(net, addr string, conf *ssh.ClientConfig) ClaimOption {
+	return func(co *claimOptions) {
+		co.dial = &dialArgs{
+			net:  net,
+			addr: addr,
+			conf: conf,
+		}
+	}
+}
+
+// WithID specifies a client ID to use when claiming. If none is given, it is
+// inferred from dial arguments.
+func WithID(id string) ClaimOption {
+	return func(co *claimOptions) {
+		co.id = id
+	}
+}
+
+// WithSessPoolOptions specifies session pool options to use during claims.
+func WithSessPoolOption(opts ...sesspool.Option) ClaimOption {
+	return func(co *claimOptions) {
+		co.sessOpts = append(co.sessOpts, opts...)
+	}
+}
+
+// WithClientFactory specifies a function to call to create a new SSH client.
+// Supports fully custom creation. Must specify an ID with this.
+func WithClientFactory(f NewSSHClientFunc) ClaimOption {
+	return func(co *claimOptions) {
+		co.newSSH = f
+	}
+}
+
+// NewSSHClientFunc returns a new ssh client.
+type NewSSHClientFunc func(ctx context.Context) (*ssh.Client, error)
+
 // TryClaimSession attempts, without blocking, to claim a session from the given ID in the pool.
 // Returns PoolExhausted error (from errors.Cause) if there are no available resources.
-func (p *ClientPool) TryClaimSession(ctx context.Context, id string, newSSH NewSSHClientFunc, opts ...sesspool.Option) (*sesspool.Session, error) {
-	cc, err := p.getOrCreate(ctx, id, newSSH, opts...)
+func (p *ClientPool) TryClaimSession(ctx context.Context, opts ...ClaimOption) (*sesspool.Session, error) {
+	co := newClaimOptions(opts...)
+
+	cc, err := p.getOrCreate(ctx, co)
 	if err != nil {
 		return nil, errors.Wrap(err, "try claim session")
 	}
@@ -200,13 +293,14 @@ func (p *ClientPool) TryClaimSession(ctx context.Context, id string, newSSH NewS
 
 // ClaimSession blocks until the context expires or a session is obtained from the given ID in the pool.
 // Will block until an appropriate connection is available, or until a session is available on a connection.
-func (p *ClientPool) ClaimSession(ctx context.Context, id string, newSSH NewSSHClientFunc, opts ...sesspool.Option) (*sesspool.Session, error) {
+func (p *ClientPool) ClaimSession(ctx context.Context, opts ...ClaimOption) (*sesspool.Session, error) {
+	co := newClaimOptions(opts...)
 	var (
 		cc  *connItem
 		err error
 	)
 	for {
-		cc, err = p.getOrCreate(ctx, id, newSSH, opts...)
+		cc, err = p.getOrCreate(ctx, co)
 		if err == nil {
 			break
 		}
