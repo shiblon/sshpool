@@ -52,7 +52,7 @@ type Session struct {
 	pool *Pool
 }
 
-func newSess(pool *Pool, sess *ssh.Session) *Session {
+func newSession(pool *Pool, sess *ssh.Session) *Session {
 	return &Session{
 		sess: sess,
 		pool: pool,
@@ -202,7 +202,7 @@ func (p *Pool) TryClaim(ctx context.Context) (*Session, error) {
 		return nil, errors.Wrap(err, "try claim")
 	}
 
-	s := newSess(p, sess)
+	s := newSession(p, sess)
 	p.busy = append(p.busy, s)
 	return s, nil
 }

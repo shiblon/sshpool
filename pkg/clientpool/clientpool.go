@@ -5,13 +5,14 @@
 //
 // Example:
 //
-//  p := New(func(ctx context.Context, id string) (ssh.Conn, error) {
-//  	// You supply this - whatever you need to do to make an ssh.Conn
-//  	// from the ID passed in. Return an error if you can't do this.
-//      return makeConn(ctx, deserializeConfig(id)), nil
-//  })
+//  p := New()
+//  defer p.Close()
 //
-//  sch, err := p.ClaimSession(ctx, serializedConfig)
+//  // set addr and  clientConfig, then
+//
+//  sch, err := p.ClaimSession(clientConfig.String, func(context.Context) (*ssh.Client, error) {
+//  	return ssh.Dial("tcp", addr, clientConfig)
+//  })
 //  if err != nil {
 //      log.Fatalf("Error claiming session: %v", err)
 //  }
@@ -48,9 +49,6 @@ var (
 	PoolExhausted = errors.New("pool full")
 )
 
-// NewSSHClientFunc creates an ssh.Client and returns it, from the given ID.
-type NewSSHClientFunc func(ctx context.Context, id string) (*ssh.Client, error)
-
 type connItem struct {
 	id       string
 	lastUsed time.Time
@@ -63,15 +61,20 @@ type connItem struct {
 type ClientPool struct {
 	sync.Mutex
 
-	newSSHClient NewSSHClientFunc
+	done  chan bool
+	conns map[string]*connItem
 
 	expireAfter time.Duration
 	poolSize    int
-	done        chan bool
-	conns       map[string]*connItem
 }
 
-// Option sets pool characteristics
+func (p *ClientPool) applyOpts(opts ...Option) {
+	for _, o := range opts {
+		o(p)
+	}
+}
+
+// Option sets client pool characteristics
 type Option func(*ClientPool)
 
 // WithExpireAfter sets the expiration time of a connection in the pool. If a
@@ -95,19 +98,18 @@ func WithPoolSize(max int) Option {
 	}
 }
 
-// New creates a new ClientPool with the given options.
-func New(newSSHClient NewSSHClientFunc, opts ...Option) *ClientPool {
-	p := &ClientPool{
-		newSSHClient: newSSHClient,
-		expireAfter:  DefaultExpireAfter,
-		poolSize:     DefaultPoolSize,
-		done:         make(chan bool),
-		conns:        make(map[string]*connItem),
-	}
+// NewSSHClientFunc returns a new ssh client.
+type NewSSHClientFunc func(ctx context.Context) (*ssh.Client, error)
 
-	for _, o := range opts {
-		o(p)
+// New creates a new ClientPool with the given options.
+func New(opts ...Option) *ClientPool {
+	p := &ClientPool{
+		done:        make(chan bool),
+		conns:       make(map[string]*connItem),
+		expireAfter: DefaultExpireAfter,
+		poolSize:    DefaultPoolSize,
 	}
+	p.applyOpts(opts...)
 
 	go func() {
 		for {
@@ -129,7 +131,7 @@ func (p *ClientPool) Exhausted() bool {
 	return len(p.conns) >= p.poolSize
 }
 
-func (p *ClientPool) getOrCreate(ctx context.Context, id string, opts ...sesspool.Option) (*connItem, error) {
+func (p *ClientPool) getOrCreate(ctx context.Context, id string, newSSH NewSSHClientFunc, opts ...sesspool.Option) (*connItem, error) {
 	defer un(lock(p))
 
 	cc := p.conns[id]
@@ -142,7 +144,7 @@ func (p *ClientPool) getOrCreate(ctx context.Context, id string, opts ...sesspoo
 	}
 
 	// Not found, room for it, create it.
-	cli, err := p.newSSHClient(ctx, id)
+	cli, err := newSSH(ctx)
 	if err != nil {
 		return nil, errors.Wrap(err, "get or create client")
 	}
@@ -181,8 +183,8 @@ func (p *ClientPool) reap() {
 
 // TryClaimSession attempts, without blocking, to claim a session from the given ID in the pool.
 // Returns PoolExhausted error (from errors.Cause) if there are no available resources.
-func (p *ClientPool) TryClaimSession(ctx context.Context, id string, opts ...sesspool.Option) (*sesspool.Session, error) {
-	cc, err := p.getOrCreate(ctx, id, opts...)
+func (p *ClientPool) TryClaimSession(ctx context.Context, id string, newSSH NewSSHClientFunc, opts ...sesspool.Option) (*sesspool.Session, error) {
+	cc, err := p.getOrCreate(ctx, id, newSSH, opts...)
 	if err != nil {
 		return nil, errors.Wrap(err, "try claim session")
 	}
@@ -198,13 +200,13 @@ func (p *ClientPool) TryClaimSession(ctx context.Context, id string, opts ...ses
 
 // ClaimSession blocks until the context expires or a session is obtained from the given ID in the pool.
 // Will block until an appropriate connection is available, or until a session is available on a connection.
-func (p *ClientPool) ClaimSession(ctx context.Context, id string, opts ...sesspool.Option) (*sesspool.Session, error) {
+func (p *ClientPool) ClaimSession(ctx context.Context, id string, newSSH NewSSHClientFunc, opts ...sesspool.Option) (*sesspool.Session, error) {
 	var (
 		cc  *connItem
 		err error
 	)
 	for {
-		cc, err = p.getOrCreate(ctx, id, opts...)
+		cc, err = p.getOrCreate(ctx, id, newSSH, opts...)
 		if err == nil {
 			break
 		}
