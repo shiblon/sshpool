@@ -10,7 +10,7 @@
 //
 //  // set addr and  clientConfig, then
 //
-//  sftpCli, cleanup, err := sesspool.AsSFTPClient(p.ClaimSession(WithDialArgs("tcp", addr, clientConfig)))
+//  sftpCli, cleanup, err := sesspool.AsSFTPClient(p.ClaimSession(ctx, WithDialArgs("tcp", addr, clientConfig)))
 //  if err != nil {
 //      log.Fatalf("Error claiming sftp session: %v", err)
 //  }
@@ -34,7 +34,6 @@ import (
 )
 
 const (
-	DefaultPoolSize    = 10
 	DefaultExpireAfter = 5 * time.Minute
 )
 
@@ -83,8 +82,8 @@ func WithExpireAfter(d time.Duration) Option {
 
 // WithPoolSize sets the pool size to something other than the default.
 func WithPoolSize(max int) Option {
-	if max <= 0 {
-		max = DefaultPoolSize
+	if max < 0 {
+		max = 0
 	}
 	return func(p *ClientPool) {
 		p.poolSize = max
@@ -97,7 +96,6 @@ func New(opts ...Option) *ClientPool {
 		done:        make(chan bool),
 		conns:       make(map[string]*connItem),
 		expireAfter: DefaultExpireAfter,
-		poolSize:    DefaultPoolSize,
 	}
 	p.applyOpts(opts...)
 
@@ -118,7 +116,12 @@ func New(opts ...Option) *ClientPool {
 // Exhausted tells us whether there are slots for new IDs to be added into the pool.
 func (p *ClientPool) Exhausted() bool {
 	defer un(lock(p))
-	return len(p.conns) >= p.poolSize
+	return p.unsafeExhausted()
+}
+
+// unsafeExhausted calculates whether the pool is exhausted without grabbing a lock.
+func (p *ClientPool) unsafeExhausted() bool {
+	return p.poolSize > 0 && len(p.conns) >= p.poolSize
 }
 
 func (p *ClientPool) getOrCreate(ctx context.Context, opts *claimOptions) (*connItem, error) {
@@ -131,7 +134,7 @@ func (p *ClientPool) getOrCreate(ctx context.Context, opts *claimOptions) (*conn
 		return cc, nil
 	}
 
-	if len(p.conns) >= p.poolSize {
+	if p.unsafeExhausted() {
 		return nil, PoolExhausted
 	}
 
