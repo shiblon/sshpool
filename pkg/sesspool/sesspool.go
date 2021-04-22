@@ -59,6 +59,15 @@ func newSession(pool *Pool, sess *ssh.Session) *Session {
 	}
 }
 
+// SFTPClientCloser is the type required by AsSFTPClient, allowing it to accept
+// a session from here or elsewhere so long as it can be used to create an
+// SFTPClient and can be closed. The clientpool module's Session type satisfies
+// this, as does the Session type found here.
+type SFTPClientCloser interface {
+	SFTPClient(opts ...sftp.ClientOption) (*sftp.Client, error)
+	Close() error
+}
+
 // AsSFTPClient can wrap a Claim method to produce an SFTP client.
 //
 // Example:
@@ -68,7 +77,7 @@ func newSession(pool *Pool, sess *ssh.Session) *Session {
 //   }
 //   defer cleanup()
 //   // use cli
-func AsSFTPClient(s *Session, err error) (*sftp.Client, func() error, error) {
+func AsSFTPClient(s SFTPClientCloser, err error) (*sftp.Client, func() error, error) {
 	if err != nil {
 		return nil, nil, errors.Wrap(err, "as sftp client")
 	}

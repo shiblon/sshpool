@@ -47,9 +47,9 @@ type connItem struct {
 	pool     *sesspool.Pool
 }
 
-// ClientPool is a set of client session pools, patitioned by ID (such as serialized
-// SSH configuration), and using the leaky bucket algorithm to age out unused
-// connections.
+// ClientPool is a set of client session pools, partitioned by ID (such as
+// serialized SSH configuration), and using the leaky bucket algorithm to age
+// out unused connections.
 type ClientPool struct {
 	sync.Mutex
 
@@ -58,6 +58,34 @@ type ClientPool struct {
 
 	expireAfter time.Duration
 	poolSize    int
+}
+
+// Session is a wrapper around sesspool.Session that knows which client pool it
+// came from, allowing it to be used to invalidate an entire connection and
+// remove it from the pool if a session returns a connection error.
+type Session struct {
+	sesspool.Session
+	item       *connItem
+	clientPool *ClientPool
+}
+
+// InvalidateClient closes the session, its underlying pool, and the
+// connection, removing it from the client pool associated with this session.
+// Useful when a session returns an error that is really an underlying
+// connection error, and no sessions on that connection can work anymore..
+func (s *Session) InvalidateClient() error {
+	serr := s.Session.Close()
+	perr := s.item.pool.Close()
+	defer un(lock(s.clientPool))
+	s.clientPool.unsafeRemoveClient(s.item.id)
+
+	if perr != nil {
+		return errors.Wrap(perr, "invalidate client")
+	}
+	if serr != nil {
+		return errors.Wrap(serr, "invalidate client")
+	}
+	return nil
 }
 
 func (p *ClientPool) applyOpts(opts ...Option) {
@@ -172,8 +200,12 @@ func (p *ClientPool) reap() {
 	}
 
 	for _, rmid := range toRemove {
-		delete(p.conns, rmid)
+		p.unsafeRemoveClient(rmid)
 	}
+}
+
+func (p *ClientPool) unsafeRemoveClient(id string) {
+	delete(p.conns, id)
 }
 
 // DialArgsID computes an ID from arguments that would be passed to ssh.Dial.
@@ -277,7 +309,7 @@ type NewSSHClientFunc func(ctx context.Context) (*ssh.Client, error)
 
 // TryClaimSession attempts, without blocking, to claim a session from the given ID in the pool.
 // Returns PoolExhausted error (from errors.Cause) if there are no available resources.
-func (p *ClientPool) TryClaimSession(ctx context.Context, opts ...ClaimOption) (*sesspool.Session, error) {
+func (p *ClientPool) TryClaimSession(ctx context.Context, opts ...ClaimOption) (*Session, error) {
 	co := newClaimOptions(opts...)
 
 	cc, err := p.getOrCreate(ctx, co)
@@ -291,12 +323,16 @@ func (p *ClientPool) TryClaimSession(ctx context.Context, opts ...ClaimOption) (
 		}
 		return nil, errors.Wrap(err, "try claim from session pool")
 	}
-	return sch, nil
+	return &Session{
+		Session:    *sch,
+		clientPool: p,
+		item:       cc,
+	}, nil
 }
 
 // ClaimSession blocks until the context expires or a session is obtained from the given ID in the pool.
 // Will block until an appropriate connection is available, or until a session is available on a connection.
-func (p *ClientPool) ClaimSession(ctx context.Context, opts ...ClaimOption) (*sesspool.Session, error) {
+func (p *ClientPool) ClaimSession(ctx context.Context, opts ...ClaimOption) (*Session, error) {
 	co := newClaimOptions(opts...)
 	var (
 		cc  *connItem
@@ -321,7 +357,11 @@ func (p *ClientPool) ClaimSession(ctx context.Context, opts ...ClaimOption) (*se
 	if err != nil {
 		return nil, errors.Wrap(err, "claim session")
 	}
-	return sch, nil
+	return &Session{
+		Session:    *sch,
+		clientPool: p,
+		item:       cc,
+	}, nil
 }
 
 // Close closes all connections in the pool (all session pools) and cleans up.
