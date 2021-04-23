@@ -50,8 +50,6 @@ var (
 type Session struct {
 	sess *ssh.Session
 	pool *Pool
-
-	isClosed bool
 }
 
 func newSession(pool *Pool, sess *ssh.Session) *Session {
@@ -119,11 +117,7 @@ func (s *Session) SFTPClient(opts ...sftp.ClientOption) (*sftp.Client, error) {
 
 // Close returns this session to the pool and closes the underlying session.
 func (s *Session) Close() (err error) {
-	if s.isClosed {
-		return nil
-	}
 	defer func() {
-		s.isClosed = true
 		cerr := s.sess.Close()
 		if err == nil {
 			err = errors.Wrap(cerr, "close ssh chan")
