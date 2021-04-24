@@ -38,7 +38,7 @@ const (
 )
 
 var (
-	PoolExhausted = errors.New("pool full")
+	PoolExhausted = errors.New("client pool exhausted")
 )
 
 type connItem struct {
@@ -321,6 +321,12 @@ func (p *ClientPool) TryClaimSession(ctx context.Context, opts ...ClaimOption) (
 		if errors.Cause(err) == sesspool.PoolExhausted {
 			return nil, errors.Wrap(PoolExhausted, "try claim from session pool")
 		}
+		// Any error in a Claim will indicate a problem with the underlying
+		// connection (right?). Since this is a waiting claim, it won't ever
+		// return sesspool.PoolExhausted.
+		cc.pool.Close()
+		defer un(lock(p))
+		p.unsafeRemoveClient(cc.id)
 		return nil, errors.Wrap(err, "try claim from session pool")
 	}
 	return &Session{
@@ -355,6 +361,12 @@ func (p *ClientPool) ClaimSession(ctx context.Context, opts ...ClaimOption) (*Se
 
 	sch, err := cc.pool.Claim(ctx)
 	if err != nil {
+		// Any error in a Claim will indicate a problem with the underlying
+		// connection (right?). Since this is a waiting claim, it won't ever
+		// return sesspool.PoolExhausted.
+		cc.pool.Close()
+		defer un(lock(p))
+		p.unsafeRemoveClient(cc.id)
 		return nil, errors.Wrap(err, "claim session")
 	}
 	return &Session{

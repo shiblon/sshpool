@@ -225,10 +225,9 @@ func (p *Pool) Claim(ctx context.Context) (*Session, error) {
 		claimErr error
 	)
 	if err := p.poolSub.Wait(ctx, []string{poolNotifyQueue}, 0, func() bool {
-		defer p.poolSub.Notify(poolNotifyQueue)
 		s, claimErr = p.TryClaim(ctx)
 		// Stop trying if successful, or a non-waitable error occurs.
-		return claimErr != nil || errors.Cause(claimErr) != PoolExhausted
+		return claimErr == nil || errors.Cause(claimErr) != PoolExhausted
 	}); err != nil {
 		return nil, errors.Wrap(err, "claim")
 	}
