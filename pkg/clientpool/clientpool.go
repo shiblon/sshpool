@@ -147,6 +147,23 @@ func (p *ClientPool) Exhausted() bool {
 	return p.unsafeExhausted()
 }
 
+// HasID indicates whether the pool has the given ID in it (an open connection).
+func (p *ClientPool) HasID(id string) bool {
+	defer un(lock(p))
+	_, ok := p.conns[id]
+	return ok
+}
+
+// NumSessionsForID returns the number of sessions in the session pool for this client ID.
+func (p *ClientPool) NumSessionsForID(id string) int {
+	defer un(lock(p))
+	cc, ok := p.conns[id]
+	if !ok || cc == nil {
+		return 0
+	}
+	return cc.pool.Used()
+}
+
 // unsafeExhausted calculates whether the pool is exhausted without grabbing a lock.
 func (p *ClientPool) unsafeExhausted() bool {
 	return p.poolSize > 0 && len(p.conns) >= p.poolSize

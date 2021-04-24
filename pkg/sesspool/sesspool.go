@@ -188,7 +188,7 @@ func (p *Pool) unsafeExhausted() bool {
 	return p.maxSessions > 0 && len(p.busy) >= p.maxSessions
 }
 
-// Len indicates how many things are busy from the pool.
+// Used indicates how many things are busy from the pool.
 func (p *Pool) Used() int {
 	defer un(lock(p))
 	return len(p.busy)
