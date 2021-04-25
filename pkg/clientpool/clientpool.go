@@ -154,6 +154,16 @@ func (p *ClientPool) HasID(id string) bool {
 	return ok
 }
 
+// PoolStats returns a map of all client IDs to the number of sessions in each pool.
+func (p *ClientPool) PoolStats() map[string]int {
+	m := make(map[string]int)
+	defer un(lock(p))
+	for id, cc := range p.conns {
+		m[id] = cc.pool.Used()
+	}
+	return m
+}
+
 // NumSessionsForID returns the number of sessions in the session pool for this client ID.
 func (p *ClientPool) NumSessionsForID(id string) int {
 	defer un(lock(p))
