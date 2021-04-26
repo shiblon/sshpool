@@ -1,0 +1,25 @@
+version: '2'
+
+#volumes:
+#  scratch:
+
+services:
+
+  sftp:
+    image: agaveplatform/sshd:latest
+    command: "-p 10022"
+    ports:
+      - 10022:10022
+
+  # go container for running tests. Local source is mounted in at container start for interative
+  # testing and development against the bundled sftp container
+  test:
+    build:
+      context: ..
+      dockerfile: test/Dockerfile
+    image: sshpool:test
+    volumes:
+      - ../test:/go/src/entrogo.com/sshpool/test
+      - ../pkg:/go/src/entrogo.com/sshpool/pkg
+
+
