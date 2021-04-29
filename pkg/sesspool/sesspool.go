@@ -120,10 +120,13 @@ func (s *Session) Close() (err error) {
 	defer func() {
 		cerr := s.sess.Close()
 		if err == nil {
+			// EOF can occur here, but is likely never actually an error in the strict sense. See:
+			// - https://stackoverflow.com/questions/60879023/getting-eof-as-error-in-golang-ssh-session-close
+			// - https://github.com/golang/go/issues/32453
 			err = errors.Wrap(cerr, "close ssh chan")
 		}
 	}()
-	return errors.Wrap(s.pool.release(s), "close ssh chan")
+	return errors.Wrap(s.pool.release(s), "release session")
 }
 
 // lock is used with un in this pattern:
@@ -241,7 +244,7 @@ func (p *Pool) Claim(ctx context.Context) (*Session, error) {
 func (p *Pool) release(s *Session) error {
 	defer un(lock(p))
 	for i, b := range p.busy {
-		if b == s {
+		if b.sess == s.sess {
 			// Swap the one we found to the end, then shorten, since order is unimportant.
 			p.busy[len(p.busy)-1], p.busy[i] = p.busy[i], p.busy[len(p.busy)-1]
 			p.busy = p.busy[:len(p.busy)-1]

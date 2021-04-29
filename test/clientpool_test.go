@@ -5,9 +5,11 @@ import (
 	"entrogo.com/sshpool/pkg/clientpool"
 	"entrogo.com/sshpool/pkg/sesspool"
 	"fmt"
+	"github.com/pkg/errors"
 	"github.com/pkg/sftp"
 	"github.com/stretchr/testify/assert"
 	"golang.org/x/crypto/ssh"
+	"io"
 	"log"
 	"testing"
 	"time"
@@ -37,7 +39,10 @@ func newClient() (*sftp.Client, func() error, error) {
 
 	addr := fmt.Sprintf("%s:%d", SSH_HOST, SSH_PORT)
 
-	return sesspool.AsSFTPClient(testPool.ClaimSession(context.Background(), clientpool.WithDialArgs("tcp", addr, cfg), clientpool.WithID(sessionId())))
+	sess, err := testPool.ClaimSession(context.Background(), clientpool.WithDialArgs("tcp", addr, cfg), clientpool.WithID(sessionId()))
+
+	return sesspool.AsSFTPClient(sess, err)
+
 }
 
 // dumps the current pool stats to stdout
@@ -58,19 +63,17 @@ func TestAsSFTPClient(t *testing.T) {
 			assert.FailNowf(t, err.Error(), "Failed to connect to test server: %v", err)
 		}
 
-		printPoolStats()
+		//printPoolStats()
 		assert.Equal(t, len(testPool.PoolStats()), 1, "test pool size should be 1 when the same host and credentials are used")
 		assert.True(t, testPool.HasID(sessionId()), "Session should be present in test pool after successful login(s)")
 		beforeSessionPoolSize := testPool.NumSessionsForID(sessionId())
 		assert.Equal(t, 1, beforeSessionPoolSize, "Session should have a single connection before cleanup")
 
 		err = cleanup()
-		if err != nil {
-			// This will always return an err.Error() == "close ssh chan: not found"
-			log.Printf("Error cleaning up client callback: %v", err.Error())
-		}
+		// Ignore EOF errors as they are likely not errors.
+		assert.True(t, err == nil || errors.Cause(err) == io.EOF, "Cleanup should return null or io.EOF: %v", err)
 
-		printPoolStats()
+		//printPoolStats()
 		assert.Equal(t, len(testPool.PoolStats()), 1, "test pool size should be 1 when the same host and credentials are used")
 		assert.True(t, testPool.HasID(sessionId()), "Session should be present in test pool after cleanup")
 		afterSessionPoolSize := testPool.NumSessionsForID(sessionId())
@@ -78,12 +81,4 @@ func TestAsSFTPClient(t *testing.T) {
 	}
 
 	log.Printf("Test completed")
-	//defer func() {
-	//	# This causes the test to deadlock indefinitely
-	//	err := testPool.Close()
-	//	if err != nil {
-	//		log.Printf("Error closing test pool: %v", err.Error())
-	//		assert.FailNowf(t, err.Error(), "Failed to close pool after test: %v", err)
-	//	}
-	//}()
 }
