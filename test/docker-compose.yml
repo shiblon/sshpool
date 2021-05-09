@@ -2,14 +2,34 @@ version: '2'
 
 #volumes:
 #  scratch:
+networks:
+  test:
+  firsthop:
+  secondhop:
 
 services:
 
   sftp:
     image: agaveplatform/sshd:latest
-    command: "-p 10022"
+    command: "-p 10022 -o PermitTunnel=yes -o AllowTcpForwarding=yes"
+    networks:
+      - test
+      - firsthop
     ports:
       - 10022:10022
+
+  jump:
+    image: agaveplatform/sshd:latest
+    command: "-p 10033 -o PermitTunnel=yes -o AllowTcpForwarding=yes"
+    networks:
+      - firsthop
+      - secondhop
+
+  jumpjump:
+    image: agaveplatform/sshd:latest
+    command: "-p 22"
+    networks:
+      - secondhop
 
   # go container for running tests. Local source is mounted in at container start for interative
   # testing and development against the bundled sftp container
@@ -18,8 +38,10 @@ services:
       context: ..
       dockerfile: test/Dockerfile
     image: sshpool:test
+    networks:
+      - test
+    depends_on:
+      - sftp
     volumes:
       - ../test:/go/src/entrogo.com/sshpool/test
       - ../pkg:/go/src/entrogo.com/sshpool/pkg
-
-
