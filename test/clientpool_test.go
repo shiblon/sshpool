@@ -6,43 +6,75 @@ import (
 	"entrogo.com/sshpool/pkg/sesspool"
 	"fmt"
 	"github.com/pkg/errors"
-	"github.com/pkg/sftp"
 	"github.com/stretchr/testify/assert"
 	"golang.org/x/crypto/ssh"
 	"io"
 	"log"
+	"strings"
 	"testing"
 	"time"
 )
 
-const (
-	SSH_HOST     = "sftp"
-	SSH_PORT     = 10022
-	SSH_USERNAME = "testuser"
-	SSH_PASSWORD = "testuser"
+var (
+	testPool *clientpool.ClientPool
+
+	sshHost = hostConfig{
+		Host:     "sftp",
+		Port:     10022,
+		Username: "testuser",
+		Password: "testuser",
+	}
+
+	sshTunnelHost = hostConfig{
+		Host:     "sftp",
+		Port:     10022,
+		Username: "testshareuser",
+		Password: "testshareuser",
+	}
+
+	sshSecondTunnelHost = hostConfig{
+		Host:     "jump",
+		Port:     10033,
+		Username: "testotheruser",
+		Password: "testotheruser",
+	}
 )
 
-var testPool = clientpool.New()
-
-func sessionId() string {
-	return fmt.Sprintf("%s:%s:%d:%s", SSH_USERNAME, SSH_HOST, SSH_PORT, SSH_PASSWORD)
+// simple struct to hold test host connectivity info
+type hostConfig struct {
+	Host     string
+	Port     int
+	Username string
+	Password string
 }
 
-func newClient() (*sftp.Client, func() error, error) {
+// serializes host connectivity info to string
+func (c *hostConfig) String() string {
+	return fmt.Sprintf("%s:%s:%d:%s", c.Username, c.Host, c.Port, c.Password)
+}
 
+// generates a ClaimOption for use when obtaining a host ssh.ClientConfig from a clientpool.ClientPool
+func (c *hostConfig) ClaimOption() clientpool.ClaimOption {
 	cfg := &ssh.ClientConfig{
-		User:            SSH_USERNAME,
-		Auth:            []ssh.AuthMethod{ssh.Password(SSH_PASSWORD)},
+		User:            c.Username,
+		Auth:            []ssh.AuthMethod{ssh.Password(c.Password)},
 		Timeout:         60 * time.Second,
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 	}
 
-	addr := fmt.Sprintf("%s:%d", SSH_HOST, SSH_PORT)
+	addr := fmt.Sprintf("%s:%d", c.Host, c.Port)
 
-	sess, err := testPool.ClaimSession(context.Background(), clientpool.WithDialArgs("tcp", addr, cfg), clientpool.WithID(sessionId()))
+	return clientpool.WithDialArgs("tcp", addr, cfg)
+}
 
-	return sesspool.AsSFTPClient(sess, err)
+// Creates a session id based on a semicolon delimited list of serialized hostConfigs.
+func sessionId(hostConfigs ...*hostConfig) string {
+	var ids []string
+	for _, cfg := range hostConfigs {
+		ids = append(ids, cfg.String())
+	}
 
+	return strings.Join(ids, ";")
 }
 
 // dumps the current pool stats to stdout
@@ -57,16 +89,23 @@ func printPoolStats() {
 // a net size of zero clients for the session.
 func TestAsSFTPClient(t *testing.T) {
 
+	testPool = clientpool.New()
+
+	sessionId := sessionId(&sshHost)
+
 	for range []int{0, 1, 2, 3, 4} {
-		_, cleanup, err := newClient()
+
+		sess, err := testPool.ClaimSession(context.Background(), sshHost.ClaimOption(), clientpool.WithID(sessionId))
+
+		_, cleanup, err := sesspool.AsSFTPClient(sess, err)
 		if err != nil {
 			assert.FailNowf(t, err.Error(), "Failed to connect to test server: %v", err)
 		}
 
 		//printPoolStats()
 		assert.Equal(t, len(testPool.PoolStats()), 1, "test pool size should be 1 when the same host and credentials are used")
-		assert.True(t, testPool.HasID(sessionId()), "Session should be present in test pool after successful login(s)")
-		beforeSessionPoolSize := testPool.NumSessionsForID(sessionId())
+		assert.True(t, testPool.HasID(sessionId), "Session should be present in test pool after successful login(s)")
+		beforeSessionPoolSize := testPool.NumSessionsForID(sessionId)
 		assert.Equal(t, 1, beforeSessionPoolSize, "Session should have a single connection before cleanup")
 
 		err = cleanup()
@@ -74,11 +113,85 @@ func TestAsSFTPClient(t *testing.T) {
 		assert.True(t, err == nil || errors.Cause(err) == io.EOF, "Cleanup should return null or io.EOF: %v", err)
 
 		//printPoolStats()
-		assert.Equal(t, len(testPool.PoolStats()), 1, "test pool size should be 1 when the same host and credentials are used")
-		assert.True(t, testPool.HasID(sessionId()), "Session should be present in test pool after cleanup")
-		afterSessionPoolSize := testPool.NumSessionsForID(sessionId())
+		assert.Equal(t, 1, len(testPool.PoolStats()), "test pool size should be 1 when the same host and credentials are used")
+		assert.True(t, testPool.HasID(sessionId), "Session should be present in test pool after cleanup")
+		afterSessionPoolSize := testPool.NumSessionsForID(sessionId)
 		assert.Equal(t, 0, afterSessionPoolSize, "Session should have a single connection after cleanup")
 	}
 
-	log.Printf("Test completed")
+	err := testPool.Close()
+	assert.Nil(t, err, fmt.Sprintf("Closing test pool should not throw error: %v", err))
+}
+
+// Tests that establishing ssh tunnels authenticates to the jump host and forwards connection.
+func TestAsSFTPClientWithTunnel(t *testing.T) {
+
+	testPool = clientpool.New()
+
+	sessionId := sessionId(&sshHost, &sshTunnelHost)
+
+	sess, err := testPool.ClaimSession(context.Background(),
+		sshHost.ClaimOption(),
+		sshTunnelHost.ClaimOption(),
+		clientpool.WithID(sessionId))
+
+	_, cleanup, err := sesspool.AsSFTPClient(sess, err)
+	if err != nil {
+		assert.FailNowf(t, err.Error(), "Failed to create ssh tunnel to jump server: %v", err)
+	}
+
+	//printPoolStats()
+	assert.True(t, testPool.HasID(sessionId), "Session should be present in test pool after successful login(s)")
+	beforeSessionPoolSize := testPool.NumSessionsForID(sessionId)
+	assert.Equal(t, 1, beforeSessionPoolSize, "Session should have a single connection before cleanup")
+
+	err = cleanup()
+	// Ignore EOF errors as they are likely not errors.
+	assert.True(t, err == nil || errors.Cause(err) == io.EOF, "Cleanup should return null or io.EOF: %v", err)
+
+	//printPoolStats()
+	assert.Equal(t, 1, len(testPool.PoolStats()), "test pool size should be 1 when the same host and credentials are used")
+	assert.True(t, testPool.HasID(sessionId), "Session should be present in test pool after cleanup")
+	afterSessionPoolSize := testPool.NumSessionsForID(sessionId)
+	assert.Equal(t, 0, afterSessionPoolSize, "Session should have a single connection after cleanup")
+
+	err = testPool.Close()
+	assert.Nil(t, err, fmt.Sprintf("Closing test pool should not throw error: %v", err))
+}
+
+// Tests that establishing multi-hop ssh tunnels
+func TestAsSFTPClientWithMultiHopTunnel(t *testing.T) {
+
+	testPool = clientpool.New()
+
+	sessionId := sessionId(&sshHost, &sshTunnelHost, &sshSecondTunnelHost)
+
+	sess, err := testPool.ClaimSession(context.Background(),
+		sshHost.ClaimOption(),
+		sshTunnelHost.ClaimOption(),
+		sshSecondTunnelHost.ClaimOption(),
+		clientpool.WithID(sessionId))
+
+	_, cleanup, err := sesspool.AsSFTPClient(sess, err)
+	if err != nil {
+		assert.FailNowf(t, err.Error(), "Failed to create ssh tunnel to jump server: %v", err)
+	}
+
+	//printPoolStats()
+	assert.True(t, testPool.HasID(sessionId), "Session should be present in test pool after successful login(s)")
+	beforeSessionPoolSize := testPool.NumSessionsForID(sessionId)
+	assert.Equal(t, 1, beforeSessionPoolSize, "Session should have a single connection before cleanup")
+
+	err = cleanup()
+	// Ignore EOF errors as they are likely not errors.
+	assert.True(t, err == nil || errors.Cause(err) == io.EOF, "Cleanup should return null or io.EOF: %v", err)
+
+	//printPoolStats()
+	assert.Equal(t, 1, len(testPool.PoolStats()), "test pool size should be 1 when the same host and credentials are used")
+	assert.True(t, testPool.HasID(sessionId), "Session should be present in test pool after cleanup")
+	afterSessionPoolSize := testPool.NumSessionsForID(sessionId)
+	assert.Equal(t, 0, afterSessionPoolSize, "Session should have a single connection after cleanup")
+
+	err = testPool.Close()
+	assert.Nil(t, err, fmt.Sprintf("Closing test pool should not throw error: %v", err))
 }

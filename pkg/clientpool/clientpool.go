@@ -25,6 +25,7 @@ package clientpool // import "entrogo.com/sshpool/pkg/clientpool"
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -253,7 +254,7 @@ type dialArgs struct {
 
 type claimOptions struct {
 	id       string
-	dial     *dialArgs
+	dial     []*dialArgs // multiple indicates proxy jumps
 	sessOpts []sesspool.Option
 	newSSH   NewSSHClientFunc
 }
@@ -271,15 +272,30 @@ func (co *claimOptions) apply(opts ...ClaimOption) {
 }
 
 func (co *claimOptions) newSSHClient(ctx context.Context) (*ssh.Client, error) {
-	if co.dial != nil && co.newSSH != nil {
+	if len(co.dial) != 0 && co.newSSH != nil {
 		return nil, errors.New("both dial args and client factory specified, only one can be given")
 	}
 	if co.newSSH != nil && co.id == "" {
 		return nil, errors.New("no ID provided with client factory")
 	}
 
-	if co.dial != nil {
-		return ssh.Dial(co.dial.net, co.dial.addr, co.dial.conf)
+	if len(co.dial) != 0 {
+		cli, err := ssh.Dial(co.dial[0].net, co.dial[0].addr, co.dial[0].conf)
+		if err != nil {
+			return nil, errors.Wrap(err, "create SSH client")
+		}
+		for i, dial := range co.dial[1:] {
+			nc, err := cli.Dial(dial.net, dial.addr)
+			if err != nil {
+				return nil, errors.Wrapf(err, "create SSH jump %d", i+1)
+			}
+			sc, chans, reqs, err := ssh.NewClientConn(nc, dial.addr, dial.conf)
+			if err != nil {
+				return nil, errors.Wrapf(err, "create SSH jump %d client conn", i+1)
+			}
+			cli = ssh.NewClient(sc, chans, reqs)
+		}
+		return cli, nil
 	}
 
 	return co.newSSH(ctx)
@@ -290,7 +306,13 @@ func (co *claimOptions) clientID() string {
 		return co.id
 	}
 
-	return DialArgsID(co.dial.net, co.dial.addr, co.dial.conf)
+	var idParts []string
+	for _, dial := range co.dial {
+		idParts = append(idParts, DialArgsID(dial.net, dial.addr, dial.conf))
+	}
+	return strings.Join(idParts, "; ")
+
+	//return DialArgsID(co.dial.net, co.dial.addr, co.dial.conf)
 }
 
 // ClaimOption changes how claims are done.
@@ -300,11 +322,11 @@ type ClaimOption func(*claimOptions)
 // If no ID is also given using WithClientID, the ID is inferred from the dial arguments.
 func WithDialArgs(net, addr string, conf *ssh.ClientConfig) ClaimOption {
 	return func(co *claimOptions) {
-		co.dial = &dialArgs{
+		co.dial = append(co.dial, &dialArgs{
 			net:  net,
 			addr: addr,
 			conf: conf,
-		}
+		})
 	}
 }
 
