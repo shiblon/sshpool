@@ -59,6 +59,15 @@ func newSession(pool *Pool, sess *ssh.Session) *Session {
 	}
 }
 
+// SFTPClientCloser is the type required by AsSFTPClient, allowing it to accept
+// a session from here or elsewhere so long as it can be used to create an
+// SFTPClient and can be closed. The clientpool module's Session type satisfies
+// this, as does the Session type found here.
+type SFTPClientCloser interface {
+	SFTPClient(opts ...sftp.ClientOption) (*sftp.Client, error)
+	Close() error
+}
+
 // AsSFTPClient can wrap a Claim method to produce an SFTP client.
 //
 // Example:
@@ -68,7 +77,7 @@ func newSession(pool *Pool, sess *ssh.Session) *Session {
 //   }
 //   defer cleanup()
 //   // use cli
-func AsSFTPClient(s *Session, err error) (*sftp.Client, func() error, error) {
+func AsSFTPClient(s SFTPClientCloser, err error) (*sftp.Client, func() error, error) {
 	if err != nil {
 		return nil, nil, errors.Wrap(err, "as sftp client")
 	}
@@ -111,10 +120,13 @@ func (s *Session) Close() (err error) {
 	defer func() {
 		cerr := s.sess.Close()
 		if err == nil {
+			// EOF can occur here, but is likely never actually an error in the strict sense. See:
+			// - https://stackoverflow.com/questions/60879023/getting-eof-as-error-in-golang-ssh-session-close
+			// - https://github.com/golang/go/issues/32453
 			err = errors.Wrap(cerr, "close ssh chan")
 		}
 	}()
-	return errors.Wrap(s.pool.release(s), "close ssh chan")
+	return errors.Wrap(s.pool.release(s), "release session")
 }
 
 // lock is used with un in this pattern:
@@ -179,7 +191,7 @@ func (p *Pool) unsafeExhausted() bool {
 	return p.maxSessions > 0 && len(p.busy) >= p.maxSessions
 }
 
-// Len indicates how many things are busy from the pool.
+// Used indicates how many things are busy from the pool.
 func (p *Pool) Used() int {
 	defer un(lock(p))
 	return len(p.busy)
@@ -216,10 +228,9 @@ func (p *Pool) Claim(ctx context.Context) (*Session, error) {
 		claimErr error
 	)
 	if err := p.poolSub.Wait(ctx, []string{poolNotifyQueue}, 0, func() bool {
-		defer p.poolSub.Notify(poolNotifyQueue)
 		s, claimErr = p.TryClaim(ctx)
 		// Stop trying if successful, or a non-waitable error occurs.
-		return claimErr != nil || errors.Cause(claimErr) != PoolExhausted
+		return claimErr == nil || errors.Cause(claimErr) != PoolExhausted
 	}); err != nil {
 		return nil, errors.Wrap(err, "claim")
 	}
@@ -233,7 +244,7 @@ func (p *Pool) Claim(ctx context.Context) (*Session, error) {
 func (p *Pool) release(s *Session) error {
 	defer un(lock(p))
 	for i, b := range p.busy {
-		if b == s {
+		if b.sess == s.sess {
 			// Swap the one we found to the end, then shorten, since order is unimportant.
 			p.busy[len(p.busy)-1], p.busy[i] = p.busy[i], p.busy[len(p.busy)-1]
 			p.busy = p.busy[:len(p.busy)-1]

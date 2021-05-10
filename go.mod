@@ -1,10 +1,11 @@
 module entrogo.com/sshpool
 
-go 1.14
+go 1.15
 
 require (
 	entrogo.com/entroq v0.3.19
 	github.com/pkg/errors v0.9.1
-	github.com/pkg/sftp v1.12.0
-	golang.org/x/crypto v0.0.0-20200820211705-5c72a883971a
+	github.com/pkg/sftp v1.13.0
+	github.com/stretchr/testify v1.6.1
+	golang.org/x/crypto v0.0.0-20201221181555-eec23a3978ad
 )
