@@ -1,8 +1,8 @@
 FROM agaveplatform/grpc-go:1.14
 
-COPY . /go/src/entrogo.com/sshpool
+COPY . /go/src/github.com/shiblon/sshpool
 
-WORKDIR /go/src/entrogo.com/sshpool/test
+WORKDIR /go/src/github.com/shiblon/sshpool/test
 
 RUN go mod vendor
 

@@ -23,15 +23,15 @@
 //
 //  // Use the sftpCli over the session until done.
 //
-package sesspool // import "entrogo.com/sshpool/pkg/sesspool"
+package sesspool
 
 import (
 	"context"
 	"sync"
 
-	"entrogo.com/entroq/subq"
 	"github.com/pkg/errors"
 	"github.com/pkg/sftp"
+	"github.com/shiblon/entroq/subq"
 	"golang.org/x/crypto/ssh"
 )
 

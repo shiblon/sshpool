@@ -43,5 +43,5 @@ services:
     depends_on:
       - sftp
     volumes:
-      - ../test:/go/src/entrogo.com/sshpool/test
-      - ../pkg:/go/src/entrogo.com/sshpool/pkg
+      - ../test:/go/src/github.com/shiblon/sshpool/test
+      - ../pkg:/go/src/github.com/shiblon/sshpool/pkg

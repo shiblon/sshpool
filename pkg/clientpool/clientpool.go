@@ -21,7 +21,8 @@
 // When a connection has no open sessions for a configurable amount of time,
 // a reaper clears it out of the pool, making room for new configurations to
 // take its place if needed.
-package clientpool // import "entrogo.com/sshpool/pkg/clientpool"
+package clientpool
+
 import (
 	"context"
 	"fmt"
@@ -29,8 +30,8 @@ import (
 	"sync"
 	"time"
 
-	"entrogo.com/sshpool/pkg/sesspool"
 	"github.com/pkg/errors"
+	"github.com/shiblon/sshpool/pkg/sesspool"
 	"golang.org/x/crypto/ssh"
 )
 

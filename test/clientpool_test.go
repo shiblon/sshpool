@@ -2,17 +2,18 @@ package test
 
 import (
 	"context"
-	"entrogo.com/sshpool/pkg/clientpool"
-	"entrogo.com/sshpool/pkg/sesspool"
 	"fmt"
-	"github.com/pkg/errors"
-	"github.com/stretchr/testify/assert"
-	"golang.org/x/crypto/ssh"
 	"io"
 	"log"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/pkg/errors"
+	"github.com/shiblon/sshpool/pkg/clientpool"
+	"github.com/shiblon/sshpool/pkg/sesspool"
+	"github.com/stretchr/testify/assert"
+	"golang.org/x/crypto/ssh"
 )
 
 var (
